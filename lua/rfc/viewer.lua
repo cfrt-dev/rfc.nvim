@@ -1,7 +1,7 @@
 local M = {}
 
 -- Find the line number (1-based) of a section header at column 0.
--- section is a string like "1." or "1.2." extracted from a TOC entry.
+-- section is a string like "1." or "A.1." extracted from a TOC entry.
 local function find_section_line(lines, section)
 	local pat = "^" .. vim.pesc(section) .. "%s"
 	for i, line in ipairs(lines) do
@@ -11,11 +11,23 @@ local function find_section_line(lines, section)
 	end
 end
 
--- Collect all section headers (lines at col 0 starting with N.)
+-- Find the line number of a named header (e.g. "Authors' Addresses") at column 0.
+local function find_named_line(lines, title)
+	local escaped = vim.pesc(title)
+	for i, line in ipairs(lines) do
+		if line == title or line:match("^" .. escaped .. "%s") then
+			return i
+		end
+	end
+end
+
 local function collect_sections(lines)
 	local sections = {}
 	for i, line in ipairs(lines) do
-		if line:match("^%d[%d%.]*%.%s+%S") then
+		if line:match("^%d[%d%.]*%.%s+%S")          -- 1.  Title
+			or line:match("^[A-Z]%.[%d%.]*%.?%s+%S") -- A.1.  Title (appendix sub)
+			or line:match("^Appendix%s+[A-Z]")        -- Appendix A.  Title
+		then
 			table.insert(sections, { lnum = i, text = vim.trim(line) })
 		end
 	end
@@ -84,27 +96,56 @@ end
 local function setup_keymaps(bufnr)
 	local opts = { buffer = bufnr, silent = true, noremap = true }
 
-	-- gd on a TOC line: jump to the corresponding section in the document.
-	-- TOC lines are indented and end with dots + page number:
-	--   "   1.2.  Background .......  5"
 	vim.keymap.set("n", "gd", function()
 		local line = vim.api.nvim_get_current_line()
-		local section = line:match("^%s+(%d[%d%.]*%.?)%s+[^.]+%.+%s*%d+%s*$")
-		if not section then
-			return
+		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+		-- Detect any TOC-style line: indented, has 3+ consecutive dots, ends with page number.
+		local is_toc = line:match("^%s+.+%.%.%..*%d+%s*$") ~= nil
+
+		if is_toc then
+			-- 1. Numeric section: "   1.2.  Title .......  N"
+			local section = line:match("^%s+(%d[%d%.]*%.?)%s+")
+
+			-- 2. Letter-based appendix sub: "     A.1.  Title .......  N"
+			if not section then
+				section = line:match("^%s+([A-Z]%.[%d%.]*%.?)%s+")
+			end
+
+			if section then
+				local target = find_section_line(lines, section)
+				if target then
+					vim.api.nvim_win_set_cursor(0, { target, 0 })
+					vim.cmd("normal! zz")
+				else
+					vim.notify("rfc.nvim: section " .. section .. " not found", vim.log.levels.WARN)
+				end
+				return
+			end
+
+			-- 3. Named entry: "   Authors' Addresses .....  N", "   Appendix A.  Title ....  N"
+			-- Lazy-extract the title text before the run of dots.
+			local title = line:match("^%s+(.-)%s*%.%.%.+.*%d+%s*$")
+			if title and #title > 0 then
+				local target = find_named_line(lines, title)
+				if target then
+					vim.api.nvim_win_set_cursor(0, { target, 0 })
+					vim.cmd("normal! zz")
+				else
+					vim.notify("rfc.nvim: '" .. title .. "' not found", vim.log.levels.WARN)
+				end
+				return
+			end
 		end
 
-		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-		local target = find_section_line(lines, section)
-		if target then
-			vim.api.nvim_win_set_cursor(0, { target, 0 })
-			vim.cmd("normal! zz")
-		else
-			vim.notify("rfc.nvim: section " .. section .. " not found", vim.log.levels.WARN)
+		-- 4. RFC cross-reference anywhere in the document: "... RFC 2119 ..."
+		--    Works in the References section and in body text.
+		local rfc_num = line:match("RFC[%s%-]?(%d+)")
+		if rfc_num then
+			require("rfc").open(rfc_num)
 		end
 	end, opts)
 
-	-- gO: open a telescope picker of all section headers in this RFC.
 	vim.keymap.set("n", "gO", function()
 		show_outline(bufnr)
 	end, opts)
@@ -116,13 +157,13 @@ local function clean(content)
 	content = content:gsub("\r", "\n") -- bare CR → LF
 	content = content:gsub("\f", "") -- form-feed page breaks
 	content = content:gsub("^\n+", "") -- leading blank lines
+	content = content:gsub("\n+$", "") -- trailing blank lines
 	return content
 end
 
 M.open = function(file_path, rfc)
 	local bufname = "RFC" .. rfc
 
-	-- Reuse an existing buffer for this RFC.
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 		if vim.fn.bufname(buf) == bufname then
 			vim.api.nvim_set_current_buf(buf)
