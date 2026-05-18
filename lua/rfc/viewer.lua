@@ -11,6 +11,40 @@ local function find_section_line(lines, section)
 	end
 end
 
+-- Return the [label] the cursor sits inside on the given line, or nil.
+local function label_under_cursor(line, col)
+	local pos = 1
+	while true do
+		local s, e, lbl = line:find("%[([^%]%[]+)%]", pos)
+		if not s then break end
+		if col >= s and col <= e then return lbl end
+		pos = e + 1
+	end
+end
+
+-- Find the line number of a reference entry "   [label]  ..." for the given label.
+local function find_ref_entry(lines, label)
+	local pat = "^%s+%[" .. vim.pesc(label) .. "%]"
+	for i, l in ipairs(lines) do
+		if l:match(pat) then return i end
+	end
+end
+
+-- Starting at a reference entry line, scan forward for the first RFC number.
+-- RFC-label entries like [RFC2104] have the number in the label itself.
+local function rfc_num_from_ref(lines, start)
+	local label = lines[start] and lines[start]:match("^%s+%[([^%]]+)%]")
+	if label then
+		local n = label:match("[Rr][Ff][Cc](%d+)")
+		if n then return n end
+	end
+	for i = start, math.min(start + 6, #lines) do
+		local n = lines[i]:match("RFC[%s%-]?(%d+)")
+		if n then return n end
+		if i > start and (lines[i] == "" or lines[i]:match("^%s+%[")) then break end
+	end
+end
+
 -- Find the line number of a named header (e.g. "Authors' Addresses") at column 0.
 local function find_named_line(lines, title)
 	local escaped = vim.pesc(title)
@@ -98,20 +132,18 @@ local function setup_keymaps(bufnr)
 
 	vim.keymap.set("n", "gd", function()
 		local line = vim.api.nvim_get_current_line()
+		local col = vim.fn.col(".")
+		local cur_lnum = vim.fn.line(".")
 		local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-		-- Detect any TOC-style line: indented, has 3+ consecutive dots, ends with page number.
-		local is_toc = line:match("^%s+.+%.%.%..*%d+%s*$") ~= nil
-
-		if is_toc then
-			-- 1. Numeric section: "   1.2.  Title .......  N"
+		-- ── TOC navigation ───────────────────────────────────────────────────
+		if line:match("^%s+.+%.%.%..*%d+%s*$") then
+			-- Numeric: "   1.2.  Title .......  N"
 			local section = line:match("^%s+(%d[%d%.]*%.?)%s+")
-
-			-- 2. Letter-based appendix sub: "     A.1.  Title .......  N"
+			-- Letter-based appendix: "     A.1.  Title .......  N"
 			if not section then
 				section = line:match("^%s+([A-Z]%.[%d%.]*%.?)%s+")
 			end
-
 			if section then
 				local target = find_section_line(lines, section)
 				if target then
@@ -122,9 +154,7 @@ local function setup_keymaps(bufnr)
 				end
 				return
 			end
-
-			-- 3. Named entry: "   Authors' Addresses .....  N", "   Appendix A.  Title ....  N"
-			-- Lazy-extract the title text before the run of dots.
+			-- Named: "   Authors' Addresses .....  N", "   Appendix A.  Title ....  N"
 			local title = line:match("^%s+(.-)%s*%.%.%.+.*%d+%s*$")
 			if title and #title > 0 then
 				local target = find_named_line(lines, title)
@@ -138,10 +168,34 @@ local function setup_keymaps(bufnr)
 			end
 		end
 
-		-- 4. RFC cross-reference anywhere in the document: "... RFC 2119 ..."
-		--    Works in the References section and in body text.
+		-- ── Reference entry line: "   [label]   Author ..., RFC NNNN, ..." ──
+		-- Cursor anywhere on the line → open the RFC it describes.
+		if line:match("^%s+%[[^%]]+%]%s+%S") then
+			local rfc_num = rfc_num_from_ref(lines, cur_lnum)
+			if rfc_num then
+				vim.cmd("vsplit")
+				require("rfc").open(rfc_num)
+			end
+			return
+		end
+
+		-- ── [label] under cursor in body text → jump to its reference entry ──
+		local lbl = label_under_cursor(line, col)
+		if lbl then
+			local target = find_ref_entry(lines, lbl)
+			if target then
+				vim.api.nvim_win_set_cursor(0, { target, 0 })
+				vim.cmd("normal! zz")
+			else
+				vim.notify("rfc.nvim: no reference entry for [" .. lbl .. "]", vim.log.levels.WARN)
+			end
+			return
+		end
+
+		-- ── Fallback: RFC NNNN anywhere (continuation lines, body text) ──────
 		local rfc_num = line:match("RFC[%s%-]?(%d+)")
 		if rfc_num then
+			vim.cmd("vsplit")
 			require("rfc").open(rfc_num)
 		end
 	end, opts)
