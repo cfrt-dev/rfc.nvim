@@ -33,18 +33,27 @@ local function show_outline(bufnr)
 
 	local pickers = require("telescope.pickers")
 	local finders = require("telescope.finders")
+	local previewers = require("telescope.previewers")
 	local conf = require("telescope.config").values
 	local action_state = require("telescope.actions.state")
 	local actions = require("telescope.actions")
 
 	local caller_win = vim.api.nvim_get_current_win()
 
+	local previewer = previewers.new_buffer_previewer({
+		title = "RFC Content",
+		define_preview = function(self, entry)
+			local start = entry.value.lnum - 1
+			local preview_lines = vim.api.nvim_buf_get_lines(bufnr, start, start + 80, false)
+			vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, preview_lines)
+			vim.bo[self.state.bufnr].filetype = "rfc"
+		end,
+	})
+
 	pickers
-		.new({
-			layout_strategy = "vertical",
-			layout_config = { width = 0.65, height = 0.5 },
-		}, {
+		.new({}, {
 			prompt_title = "RFC Sections",
+			previewer = previewer,
 			finder = finders.new_table({
 				results = sections,
 				entry_maker = function(entry)
@@ -106,6 +115,7 @@ local function clean(content)
 	content = content:gsub("\r\n", "\n") -- CRLF → LF
 	content = content:gsub("\r", "\n") -- bare CR → LF
 	content = content:gsub("\f", "") -- form-feed page breaks
+	content = content:gsub("^\n+", "") -- leading blank lines
 	return content
 end
 
