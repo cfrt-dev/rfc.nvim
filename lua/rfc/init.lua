@@ -1,201 +1,125 @@
 local M = {}
 
-local has_plenary, plenary = pcall(require, "plenary")
+M.config = {
+	rfc_dir = nil,
+}
 
-if not has_plenary then
-	error("This plugin requires nvim-lua/plenary.nvim to work.")
-end
-
-local has_telescope, _ = pcall(require, "telescope")
-
-if not has_telescope then
-	error("This plugins requires nvim-telescope/telescope.nvim to work.")
-end
-
-local config = {}
-
-local file_exists = function(name)
-	local f = io.open(name, "r")
-	if f ~= nil then
-		io.close(f)
+local function file_exists(path)
+	local f = io.open(path, "r")
+	if f then
+		f:close()
 		return true
-	else
-		return false
 	end
-end
-
-local function slice(tbl, first, last, step)
-	local sliced = {}
-	for i = first or 1, last or #tbl, step or 1 do
-		sliced[#sliced + 1] = tbl[i]
-	end
-	return sliced
-end
-
-local function buffer_exists(name)
-	name = vim.fn.expand("%:p:h") .. "/" .. name
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.api.nvim_buf_get_name(buf) == name then
-			return buf
-		end
-	end
-	return nil
-end
-
-local open_rfc_buf = function(file_path, rfc)
-	local file = io.open(file_path, "r")
-	if file == nil then
-		error("File " .. file_path .. "not found.")
-		return
-	end
-
-	local file_content = file:read("a")
-	file:close()
-
-	local bufnr = buffer_exists("RFC" .. rfc)
-
-	if bufnr then
-		vim.cmd("q!")
-		vim.api.nvim_set_current_buf(bufnr)
-		return
-	end
-
-	bufnr = vim.api.nvim_create_buf(true, true)
-
-	vim.api.nvim_buf_set_name(bufnr, "RFC" .. rfc)
-	vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.split(file_content, "\n"))
-
-	vim.api.nvim_buf_attach(bufnr, false, {
-		on_detach = function(_, _)
-			vim.api.nvim_buf_delete(bufnr, { force = true })
-		end,
-	})
-
-	vim.cmd("q!")
-	vim.api.nvim_set_current_buf(bufnr)
-end
-
-local function sed_index(writer)
-	plenary.job
-		:new({
-			command = "sed",
-			args = { "-sr", [[s/RFC([0-9]+) \|.*\|.*, "(.*)".*/RFC\1:\2/]] },
-			writer = writer:result(),
-			on_exit = function(j, _)
-				local file = io.open(config.rfc_dir .. "/rfc-ref.txt", "w")
-				local content = j:result()
-				content = slice(content, 5, #content)
-				file:write(table.concat(content, "\n") .. "\n")
-				file:close()
-			end,
-		})
-		:start()
+	return false
 end
 
 M.download_index = function()
-	plenary.job
-		:new({
-			command = "curl",
-			args = { "https://www.rfc-editor.org/rfc/rfc-ref.txt" },
-			on_exit = function(j, return_val)
-				if return_val == 0 then
-					sed_index(j)
-				else
-					error("Failed to download index")
+	local Job = require("plenary.job")
+	local index_path = M.config.rfc_dir .. "/rfc-ref.txt"
+
+	Job:new({
+		command = "curl",
+		args = { "-fsSL", "https://www.rfc-editor.org/rfc/rfc-ref.txt" },
+		on_exit = function(j, code)
+			if code ~= 0 then
+				vim.schedule(function()
+					vim.notify("rfc.nvim: failed to download index", vim.log.levels.ERROR)
+				end)
+				return
+			end
+
+			local entries = {}
+			for _, line in ipairs(j:result()) do
+				local num, title = line:match('RFC(%d+)%s*|[^|]+|.*"([^"]+)"')
+				if num then
+					table.insert(entries, "RFC" .. tonumber(num) .. ":" .. title)
 				end
-			end,
-		})
-		:start()
+			end
+
+			local file = io.open(index_path, "w")
+			if file then
+				file:write(table.concat(entries, "\n") .. "\n")
+				file:close()
+				vim.schedule(function()
+					vim.notify(("rfc.nvim: index updated (%d RFCs)"):format(#entries), vim.log.levels.INFO)
+				end)
+			end
+		end,
+	}):start()
 end
 
 M.download_rfc = function(rfc)
-	plenary.job
-		:new({
-			command = "wget",
-			args = { "-O", config.rfc_dir .. "/rfc" .. rfc .. ".txt", "https://www.ietf.org/rfc/rfc" .. rfc .. ".txt" },
-			on_exit = function(j, return_val)
-				if return_val ~= 0 then
-					error("Failed to download RFC")
-				end
-			end,
-		})
-		:sync()
+	local Job = require("plenary.job")
+	local path = M.config.rfc_dir .. "/rfc" .. rfc .. ".txt"
+
+	Job:new({
+		command = "curl",
+		args = { "-fsSL", "-o", path, "https://www.rfc-editor.org/rfc/rfc" .. rfc .. ".txt" },
+		on_exit = function(_, code)
+			if code ~= 0 then
+				vim.schedule(function()
+					vim.notify("rfc.nvim: failed to download RFC " .. rfc, vim.log.levels.ERROR)
+				end)
+			end
+		end,
+	}):sync()
+end
+
+M.open = function(rfc)
+	local path = M.config.rfc_dir .. "/rfc" .. rfc .. ".txt"
+
+	if not file_exists(path) then
+		vim.notify("rfc.nvim: downloading RFC " .. rfc .. "...", vim.log.levels.INFO)
+		M.download_rfc(rfc)
+	end
+
+	if not file_exists(path) then
+		vim.notify("rfc.nvim: RFC " .. rfc .. " not available", vim.log.levels.ERROR)
+		return
+	end
+
+	require("rfc.viewer").open(path, rfc)
+end
+
+M.list = function(opts)
+	require("rfc.search").open(opts)
 end
 
 M.setup = function(opts)
-	config.rfc_dir = opts.rfc_dir or vim.fn.stdpath("data") .. "/rfc.nvim"
-	config.rfc_dir = config.rfc_dir .. "/rfc"
+	opts = opts or {}
+	M.config.rfc_dir = opts.rfc_dir or (vim.fn.stdpath("data") .. "/rfc.nvim/rfc")
 
-	if vim.fn.isdirectory(config.rfc_dir) == 0 then
-		vim.fn.mkdir(config.rfc_dir, "p")
+	if vim.fn.isdirectory(M.config.rfc_dir) == 0 then
+		vim.fn.mkdir(M.config.rfc_dir, "p")
 	end
 
 	if vim.fn.executable("curl") ~= 1 then
-		error("This plugin requires curl")
+		error("rfc.nvim: curl is required")
 	end
 
-	if vim.fn.executable("sed") == 0 then
-		error("This plugin requires sed")
+	if not pcall(require, "plenary") then
+		error("rfc.nvim: nvim-lua/plenary.nvim is required")
 	end
 
-	if not file_exists(config.rfc_dir .. "/rfc-ref.txt") then
+	if not pcall(require, "telescope") then
+		error("rfc.nvim: nvim-telescope/telescope.nvim is required")
+	end
+
+	if not file_exists(M.config.rfc_dir .. "/rfc-ref.txt") then
 		M.download_index()
 	end
-end
 
-local pickers = require("telescope.pickers")
-local finders = require("telescope.finders")
-local action_state = require("telescope.actions.state")
-local sorters = require("telescope.sorters")
+	vim.api.nvim_create_user_command("RfcSearch", function()
+		M.list()
+	end, { desc = "Search and open RFCs" })
 
-M.list_rfcs = function(opts)
-	opts = opts or {
-		layout_strategy = "vertical",
-		layout_config = {
-			width = 0.7,
-			height = 0.5,
-		},
-	}
+	vim.api.nvim_create_user_command("RfcOpen", function(cmd)
+		M.open(cmd.args)
+	end, { nargs = 1, desc = "Open RFC by number" })
 
-	local file_ref = io.open(config.rfc_dir .. "/rfc-ref.txt", "r")
-
-	if file_ref == nil then
-		error("Can not file rfc-ref.txt file")
-	end
-
-	local content_ref = file_ref:read("*a")
-	file_ref:close()
-
-	pickers
-		.new(opts, {
-			prompt_title = "RFCs",
-
-			finder = finders.new_table({
-				results = vim.split(content_ref, "\n"),
-			}),
-
-			sorter = sorters.get_generic_fuzzy_sorter({}),
-
-			attach_mappings = function(_, map)
-				local function open_rfc()
-					local selection = action_state.get_selected_entry()[1]
-					local rfc = selection:match("RFC(%d+)")
-					local file = config.rfc_dir .. "/rfc" .. rfc .. ".txt"
-
-					if not file_exists(file) then
-						M.download_rfc(rfc)
-					end
-
-					open_rfc_buf(file, rfc)
-				end
-
-				map("i", "<CR>", open_rfc)
-				map("n", "<CR>", open_rfc)
-
-				return true
-			end,
-		})
-		:find()
+	vim.api.nvim_create_user_command("RfcUpdateIndex", function()
+		M.download_index()
+	end, { desc = "Re-download RFC index" })
 end
 
 return M
