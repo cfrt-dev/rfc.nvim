@@ -50,11 +50,11 @@ end
 
 M.download_rfc = function(rfc)
 	local Job = require("plenary.job")
-	local path = M.config.rfc_dir .. "/rfc" .. rfc .. ".txt"
+	local path = M.config.rfc_dir .. "/rfc" .. rfc .. ".html"
 
 	Job:new({
 		command = "curl",
-		args = { "-fsSL", "-o", path, "https://www.rfc-editor.org/rfc/rfc" .. rfc .. ".txt" },
+		args = { "-fsSL", "-o", path, "https://www.rfc-editor.org/rfc/rfc" .. rfc .. ".html" },
 		on_exit = function(_, code)
 			if code ~= 0 then
 				vim.schedule(function()
@@ -66,7 +66,7 @@ M.download_rfc = function(rfc)
 end
 
 M.open = function(rfc)
-	local path = M.config.rfc_dir .. "/rfc" .. rfc .. ".txt"
+	local path = M.config.rfc_dir .. "/rfc" .. rfc .. ".html"
 
 	if not file_exists(path) then
 		vim.notify("rfc.nvim: downloading RFC " .. rfc .. "...", vim.log.levels.INFO)
@@ -95,6 +95,10 @@ M.setup = function(opts)
 
 	if vim.fn.executable("curl") ~= 1 then
 		error("rfc.nvim: curl is required")
+	end
+
+	if vim.fn.executable("python3") ~= 1 then
+		error("rfc.nvim: python3 is required")
 	end
 
 	if not pcall(require, "plenary") then
