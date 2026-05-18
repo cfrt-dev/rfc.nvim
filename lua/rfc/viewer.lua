@@ -30,6 +30,18 @@ local function link_at(bufnr, lnum, col)
 	end
 end
 
+-- Return the first internal-anchor link on lnum (0-based), or nil.
+-- Used so pressing gd anywhere on a TOC line follows the section link.
+local function anchor_link_on_line(bufnr, lnum)
+	local d = buf_data[bufnr]
+	if not d then return nil end
+	for _, lnk in ipairs(d.links) do
+		if lnk.line == lnum and lnk.href:sub(1, 1) == "#" then
+			return lnk
+		end
+	end
+end
+
 -- Jump to anchor id in the current window. Returns true on success.
 local function jump_to_anchor(bufnr, id)
 	local d = buf_data[bufnr]
@@ -116,7 +128,7 @@ local function setup_keymaps(bufnr)
 	vim.keymap.set("n", "gd", function()
 		local lnum = vim.fn.line(".") - 1  -- 0-based
 		local col  = vim.fn.col(".") - 1   -- 0-based
-		local lnk  = link_at(bufnr, lnum, col)
+		local lnk  = link_at(bufnr, lnum, col) or anchor_link_on_line(bufnr, lnum)
 		if not lnk then return end
 
 		local href = lnk.href
